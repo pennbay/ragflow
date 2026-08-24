@@ -1,0 +1,83 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+USER root
+SHELL ["/bin/bash", "-c"]
+
+ARG NEED_MIRROR=1
+ARG RAGFLOW_VERSION=dev
+
+ENV VIRTUAL_ENV=/ragflow/.venv
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+RUN set -eux; \
+    py_site="$("${VIRTUAL_ENV}/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; \
+    ln -sfn "${py_site}" "${VIRTUAL_ENV}/lib/site-packages"
+
+ENV GPU_CUDA_LIB_PATH="${VIRTUAL_ENV}/lib/site-packages/nvidia/cuda_runtime/lib:${VIRTUAL_ENV}/lib/site-packages/nvidia/cublas/lib:${VIRTUAL_ENV}/lib/site-packages/nvidia/curand/lib:${VIRTUAL_ENV}/lib/site-packages/nvidia/cufft/lib:${VIRTUAL_ENV}/lib/site-packages/nvidia/cudnn/lib:${VIRTUAL_ENV}/lib/site-packages/nvidia/nvjitlink/lib"
+ENV LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:${GPU_CUDA_LIB_PATH}"
+
+RUN set -eux; \
+    if [[ "${NEED_MIRROR}" == "1" ]]; then \
+        export PIP_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple"; \
+    fi; \
+    export PIP_EXTRA_INDEX_URL="https://pypi.org/simple"; \
+    python -m pip install --no-cache-dir \
+        "nvidia-cuda-runtime-cu12>=12.6,<13" \
+        "nvidia-cublas-cu12>=12.6,<13" \
+        "nvidia-curand-cu12>=10.3,<11" \
+        "nvidia-cufft-cu12>=11.3,<12" \
+        "nvidia-cudnn-cu12>=9.3,<10" \
+        "nvidia-nvjitlink-cu12>=12.6,<13" \
+        "onnxruntime-gpu==1.23.2"; \
+    python - <<'PY'
+import importlib.util
+import os
+import subprocess
+import sys
+
+if importlib.util.find_spec("torch") is None:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "--no-cache-dir", "torch>=2.5.0,<3.0.0"])
+
+lib_root = os.path.join(
+    sys.prefix,
+    "lib",
+    "site-packages",
+    "nvidia",
+)
+required = [
+    "cuda_runtime/lib/libcudart.so.12",
+    "cublas/lib/libcublas.so.12",
+    "cublas/lib/libcublasLt.so.12",
+    "curand/lib/libcurand.so.10",
+    "cufft/lib/libcufft.so.11",
+    "cudnn/lib/libcudnn.so.9",
+]
+missing = [path for path in required if not os.path.exists(os.path.join(lib_root, path))]
+if missing:
+    raise SystemExit(f"Missing CUDA runtime libraries after install: {missing}")
+PY
+
+RUN python - <<'PY'
+import ctypes
+import os
+
+for name in [
+    "libcudart.so.12",
+    "libcublas.so.12",
+    "libcublasLt.so.12",
+    "libcurand.so.10",
+    "libcufft.so.11",
+    "libcudnn.so.9",
+]:
+    ctypes.CDLL(name)
+print("Loaded CUDA libraries from", os.environ["GPU_CUDA_LIB_PATH"])
+PY
+
+RUN python - <<'PY'
+import torch
+
+print("ragflow gpu image version:", "${RAGFLOW_VERSION}")
+print("torch version:", torch.__version__)
+print("torch cuda available:", torch.cuda.is_available())
+print("torch device count:", torch.cuda.device_count())
+PY

@@ -94,6 +94,28 @@ class RAGFlowConnector:
         res = await client.get(url=self.api_url + path, params=params, headers={"Authorization": f"Bearer {api_key}"})
         return res
 
+    async def _resolve_default_rerank_id(self, *, api_key: str) -> str | None:
+        """Resolve the current tenant's default reranker from model settings."""
+        res = await self._get("/users/me/models", api_key=api_key)
+        if not res:
+            return None
+        if res.status_code != 200:
+            logging.warning("MCP retrieval could not resolve default reranker: status=%s", res.status_code)
+            return None
+        try:
+            res_json = res.json()
+        except Exception:
+            logging.warning("MCP retrieval could not parse /users/me/models response", exc_info=True)
+            return None
+
+        if res_json.get("code") != 0:
+            logging.warning("MCP retrieval could not resolve default reranker: %s", res_json.get("message"))
+            return None
+
+        data = res_json.get("data") or {}
+        rerank_id = data.get("rerank_id")
+        return rerank_id or None
+
     def _is_cache_valid(self, ts):
         return time.time() < ts
 
@@ -268,10 +290,10 @@ class RAGFlowConnector:
         document_ids=None,
         question="",
         page=1,
-        page_size=30,
+        page_size=10,
         similarity_threshold=0.2,
         vector_similarity_weight=0.3,
-        top_k=1024,
+        top_k=128,
         rerank_id: str | None = None,
         keyword: bool = False,
         force_refresh: bool = False,
@@ -285,6 +307,11 @@ class RAGFlowConnector:
             if not dataset_ids:
                 logging.info("MCP retrieval found no accessible datasets for current user")
                 raise Exception([types.TextContent(type="text", text="No accessible datasets found.")])
+
+        if not rerank_id:
+            rerank_id = await self._resolve_default_rerank_id(api_key=api_key)
+            if rerank_id:
+                logging.info("MCP retrieval resolved empty rerank_id to tenant default reranker")
 
         data_json = {
             "page": page,
@@ -584,7 +611,7 @@ async def list_tools(*, connector: RAGFlowConnector, api_key: str) -> list[types
                     "top_k": {
                         "type": "integer",
                         "description": "Maximum results to consider before ranking",
-                        "default": 1024,
+                        "default": 128,
                         "minimum": 1,
                         "maximum": 1024,
                     },
@@ -668,7 +695,7 @@ async def call_tool(
         similarity_threshold = arguments.get("similarity_threshold", 0.2)
         vector_similarity_weight = arguments.get("vector_similarity_weight", 0.3)
         keyword = arguments.get("keyword", False)
-        top_k = arguments.get("top_k", 1024)
+        top_k = arguments.get("top_k", 128)
         rerank_id = arguments.get("rerank_id")
         force_refresh = arguments.get("force_refresh", False)
 
